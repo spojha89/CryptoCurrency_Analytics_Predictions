@@ -1,0 +1,501 @@
+Project-
+Detect trading signal in cryptocurrencies 
+
+
+Data Source-
+CoinGecko API (Free tier: 10-50 calls/min)
+
+Core components-
+- AWS lambda
+- AWS kinesis
+- AWS DynamoDB
+- Eventbridge
+- Cloudwatch
+- IAM and roles
+
+https://www.coingecko.com/en/developers/dashboard
+For crypto token usage summary 
+
+
+Functions- (High Level)
+
+
+- Lambda- Access CoinGecko API and load specific tags ~1hr
+- Plan for storing tags ~2hr
+- Create Kinesis streams that will process tags ~2hr
+- Create dynamoDB tables which will store ~1hr
+- Aggregation logics calculations- 5hrs
+- Quicksight implementation with graphs to show aggregations- 3hr
+
+Low Level-
+
+1. Lambda-
+
+coingecko website link- https://docs.coingecko.com/v3.0.1/reference/simple-price
+
+some currencies- 
+            'bitcoin': 'BTC'
+            'ethereum': 'ETH',
+            'solana': 'SOL',
+            'cardano': 'ADA'
+
+
+Get the bitcoin prices by IDs-
+
+https://api.coingecko.com/api/v3/simple/price?vs_currencies=usd&ids=bitcoin&x_cg_demo_api_key=CG-PSVevtD1B4esEFMhgu5ZGKMm
+
+
+API request-
+
+import requests
+
+url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1"
+
+headers = {"x-cg-demo-api-key": "<api-key>"}
+
+response = requests.get(url, headers=headers)
+
+print(response.text)
+
+Example of how python calls it-
+
+import requests
+url = ‘https://api.coingecko.com/api/v3/simple/price’
+params = {  
+         ‘ids’: ‘bitcoin’,
+         ‘vs_currencies’: ‘USD’
+}
+
+} # Replace 'YOUR_API_KEY' with your actual API key
+headers = { 'x-cg-demo-api-key': 'YOUR_API_KEY' }
+
+response = requests.get(url, params = params)
+
+Complete usage example-
+https://www.coingecko.com/learn/python-query-coingecko-api
+
+
+Response-
+
+{
+    "bitcoin": {
+        "usd": 87037,
+        "usd_market_cap": 1738332206735.3381,
+        "usd_24h_vol": 45102475159.332664,
+        "usd_24h_change": 1.5662022163293967
+    }
+}
+
+
+2. Kinesis-
+
+aws kinesis create-stream --stream-name lambda-stream --shard-count 1
+
+aws kinesis describe-stream --stream-name lambda-stream
+
+aws kinesis put-record --stream-name lambda-stream --partition-key 1 \
+--data "Hello, this is a test."
+
+
+aws kinesis put-records \
+    --stream-name samplestream \
+    --records Data=blob1,PartitionKey=partitionkey1 Data=blob2,PartitionKey=partitionkey2
+
+import boto3
+kinesis = boto3.client('kinesis', region_name='us-east-1')
+
+            kinesis.put_record(
+                StreamName=os.environ['KINESIS_DATASTREAM'],
+                Data=json.dumps(response.json()),
+                PartitionKey=crypto_full
+            )
+			
+Go to Kinesis --> Data Viewer --> select shard and pick starting position as "Trim Horizon" --> it will show records 
+
+It will also show under monitoring. 
+
+Note- 
+
+Instead of topic as in kafka, kinesis has partitionkey. 
+
+
+[{'crypto': 'bitcoin', 'price': 86655, 'market_cap': 1724362434390.975, '24hr_vol': 45570139013.074196, '24hr_change': -1.0872773083855538}, {'crypto': 'ethereum', 'price': 2844.79, 'market_cap': 342653244909.0589, '24hr_vol': 25036848009.04689, '24hr_change': -3.1137533334454024}, {'crypto': 'solana', 'price': 124.47, 'market_cap': 70018903519.32945, '24hr_vol': 5065013104.04999, '24hr_change': -2.89555921277808}, {'crypto': 'cardano', 'price': 0.372692, 'market_cap': 13655365095.243036, '24hr_vol': 608647647.5373307, '24hr_change': -3.713432297107623}]
+
+
+3. Process Kinesis Data-
+
+lambda function to read from kinesis 
+
+test record-
+
+{
+  "Records": [
+    {
+      "kinesis": {
+        "data": "eyJjcnlwdG8iOiAiQlRDIiwgInByaWNlX3VzZCI6IDQzMDAwLCAibWFya2V0X2NhcF91c2QiOiA4NTAwMDAwMDAwLCAiMjRocl92b2wiOiAxMjAwMDAwLCAiMjRocl9jaGFuZ2UiOiAtMS4yfQ=="
+      }
+    }
+  ]
+}
+
+
+write to dynamoDB
+
+DynamoDB table definitions-
+
+
+
+4. Store in dynamoDB-
+
+Table1:
+crypto_raw_data-
+currency/crypto_id (primary key)
+loading_time
+attributes: price, marketcap, volume, source
+
+aws dynamodb create-table \
+    --table-name crypto_raw_data \
+    --attribute-definitions \
+        AttributeName=crypto_id,AttributeType=S \
+		AttributeName=loading_time,AttributeType=N \
+    --key-schema AttributeName=crypto_id,KeyType=HASH AttributeName=loading_time,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST \
+    --table-class STANDARD
+
+Table2:
+crypto_aggregated_data-
+currency/crypto_id
+time_window- 5min, 30min, 60min, 24hr
+avg_price, min_price, max_price, volume_aggregated, chg_pct
+
+aws dynamodb create-table \
+    --table-name crypto_aggregated_data \
+    --attribute-definitions \
+        AttributeName=crypto_id,AttributeType=S \
+		AttributeName=time_window,AttributeType=N \
+    --key-schema AttributeName=crypto_id,KeyType=HASH AttributeName=time_window,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST \
+    --table-class STANDARD
+
+Table 3: 
+trading_signals
+PK: signal_id (UUID)
+SK: timestamp
+Attributes: crypto_id, signal_type, price, confidence_score
+GSI: crypto_id-timestamp-index
+
+
+
+
+Operations-
+
+aws dynamodb list-tables
+~ $ aws dynamodb list-tables
+{
+    "TableNames": [
+        "crypto_aggregated_data",
+        "crypto_raw_data"
+    ]
+}
+
+aws dynamodb put-item \
+    --table-name Music  \
+    --item \
+        '{"Artist": {"S": "No One You Know"}, "SongTitle": {"S": "Call Me Today"}, "AlbumTitle": {"S": "Somewhat Famous"}, "Awards": {"N": "1"}}'
+
+aws dynamodb get-item --consistent-read \
+    --table-name Music \
+    --key '{ "Artist": {"S": "Acme Band"}, "SongTitle": {"S": "Happy Day"}}'
+
+aws dynamodb update-item \
+    --table-name Music \
+    --key '{ "Artist": {"S": "Acme Band"}, "SongTitle": {"S": "Happy Day"}}' \
+    --update-expression "SET AlbumTitle = :newval" \
+    --expression-attribute-values '{":newval":{"S":"Updated Album Title"}}' \
+    --return-values ALL_NEW
+
+aws dynamodb query \
+    --table-name Music \
+    --key-condition-expression "Artist = :name" \
+    --expression-attribute-values  '{":name":{"S":"Acme Band"}}'
+
+aws dynamodb delete-table --table-name Music
+
+Ex of index-
+
+{
+    TableName: "Music",
+    AttributeDefinitions:[
+        {AttributeName: "Genre", AttributeType: "S"},
+        {AttributeName: "Price", AttributeType: "N"}
+    ],
+    GlobalSecondaryIndexUpdates: [
+        {
+            Create: {
+                IndexName: "GenreAndPriceIndex",
+                KeySchema: [
+                    {AttributeName: "Genre", KeyType: "HASH"}, //Partition key
+                    {AttributeName: "Price", KeyType: "RANGE"}, //Sort key
+                ],
+                Projection: {
+                    "ProjectionType": "ALL"
+                },
+                ProvisionedThroughput: {                                // Only specified if using provisioned mode
+                    "ReadCapacityUnits": 1,"WriteCapacityUnits": 1
+                }
+            }
+        }
+    ]
+}
+
+Scanning or querying on table (always done on index)-
+// All of the rock songs
+
+{
+    TableName: "Music",
+    IndexName: "GenreAndPriceIndex",
+    KeyConditionExpression: "Genre = :genre",
+    ExpressionAttributeValues: {
+        ":genre": "Rock"
+    },
+};
+
+	
+
+5. Link kinesis stream with Lambda function as trigger program
+
+Calculate average like:
+- 30min, 60min avg, 
+- min, max, 
+- percentage of change 
+- volume spike 
+- RSI (Relative Strength Index)
+- Volume > 2x average
+- Price change > 5% in 1 hour
+- Price crossed MA (buy/sell signal)
+
+and then load into crypto_aggregated_data
+
+6. Visualize using quicksight
+
+- Real-time Price Chart (line chart, last 24h)
+- Volume Heatmap (across cryptocurrencies)
+- Correlation Matrix (crypto price movements)
+
+
+*************
+All questions in cryptocurrencies-
+
+1️⃣ Core Real-Time Trading Questions (Most Common)
+
+These are 90% of dashboards in production.
+
+1. Is the price trending up or down?
+
+Short MA vs Long MA
+
+Slope of MA
+
+🟢 MA(5) vs MA(30) crossover
+🟢 Linear regression slope
+
+2. Where is the best buy point?
+
+Price crossing above MA
+
+Momentum turning positive
+
+🟢 Price > MA(20)
+🟢 RSI < 30 → rebound
+🟡 ML confidence on breakout
+
+3. Where is the best sell point?
+
+Overbought conditions
+
+Trend weakening
+
+🟢 Price < MA(20)
+🟢 RSI > 70
+🟡 ML probability of reversal
+
+4. Is this move real or just noise?
+
+Sudden spikes vs sustained trend
+
+🟢 Volatility bands
+🔵 Anomaly detection
+
+2️⃣ Trend & Momentum Analysis
+5. Is momentum accelerating or decelerating?
+
+First and second derivative of price
+
+🟢 Rate of change
+🟢 MACD histogram
+🔵 Momentum prediction (LSTM)
+
+6. How strong is the trend?
+
+Weak trend → avoid trades
+
+🟢 ADX
+🟡 Trend-strength classifier
+
+7. Are we in a range-bound market?
+
+Mean reversion opportunity
+
+🟢 Bollinger Bands width
+🔵 Regime classification
+
+3️⃣ Volatility & Risk Questions (Very Important)
+8. How volatile is the asset right now?
+
+High volatility → wider stop loss
+
+🟢 Rolling standard deviation
+🟢 ATR (Average True Range)
+
+9. What’s my downside risk?
+
+Worst expected loss in next X minutes
+
+🟡 Value at Risk (VaR)
+🔵 Quantile regression
+
+10. Should I reduce position size?
+
+Volatility spike detection
+
+🟢 Volatility threshold
+🔵 Risk-aware models
+
+4️⃣ Volume & Liquidity (If Available)
+11. Is volume confirming the price move?
+
+Price ↑ but volume ↓ = weak signal
+
+🟢 Volume MA
+🟡 ML confirmation score
+
+12. Is this a fake breakout?
+
+Low liquidity spikes
+
+🔵 Anomaly detection
+🔵 Clustering on trade patterns
+
+5️⃣ Multi-Timeframe Questions (Very Common)
+13. Is the 1-min trend aligned with 15-min trend?
+
+Avoid counter-trend trades
+
+🟢 MA alignment
+🔵 Multi-scale models
+
+14. Are we near a higher-timeframe resistance?
+
+Don’t buy into resistance
+
+🟡 Pattern detection
+🔵 CNN on price charts
+
+6️⃣ Pattern Recognition (Harder)
+15. Is a known chart pattern forming?
+
+Head & shoulders
+
+Double top / bottom
+
+🔵 CNN / pattern recognition
+🟡 Rule + ML hybrid
+
+16. Is this a breakout or false breakout?
+
+Critical for entry timing
+
+🟡 Rule-based filters
+🔵 Classification model
+
+7️⃣ Correlation & Market Context
+17. Is BTC driving this move?
+
+Altcoins often follow BTC
+
+🟢 Correlation coefficients
+🔵 Graph-based ML
+
+18. Are multiple assets moving together?
+
+Market-wide sentiment
+
+🟢 Heatmaps
+🔵 Clustering (K-Means)
+
+8️⃣ Timing & Session Analysis
+19. When does this asset usually move?
+
+Certain hours more volatile
+
+🟢 Time-bucket analysis
+🔵 Time-of-day prediction
+
+20. Is weekend behavior different?
+
+Crypto trades 24/7
+
+🔵 Regime detection
+
+9️⃣ Forecasting (Use Carefully ⚠️)
+21. Where is price likely to be in next 5–30 minutes?
+
+Short-term prediction only
+
+🔵 LSTM / Transformer
+🟡 Ensemble with indicators
+
+⚠️ Used as confidence score, not truth.
+
+22. What’s the probability of price going up next?
+
+Binary classification
+
+🔵 Logistic / XGBoost
+🔵 Sequence models
+
+10️⃣ Strategy Evaluation (Often Ignored, Very Important)
+23. Is my MA crossover strategy profitable?
+
+Backtesting
+
+🟢 Historical simulation
+🔵 Reinforcement learning
+
+24. What parameters work best?
+
+MA(5, 20) vs MA(10, 50)
+
+🔵 Bayesian optimization
+🔵 Genetic algorithms
+
+11️⃣ AI/ML-Specific Analytical Questions
+25. Can AI detect regime change earlier than indicators?
+
+Trend → range → crash
+
+🔵 Hidden Markov Models
+🔵 LSTM attention
+
+26. Can AI reduce false signals?
+
+Filter bad trades
+
+🔵 Ensemble classifiers
+
+27. Can AI adapt to market behavior changes?
+
+Concept drift handling
+
+🔵 Online learning
+🔵 Drift detection
